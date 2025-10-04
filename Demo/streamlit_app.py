@@ -1,17 +1,18 @@
 # streamlit_app.py
 # OperAI — AI Virtual Company (Streamlit, single-file demo)
 # Premium UI • Planner→DAG • Execution State Machine • Business OS Modules • Comms Hub
-# v2: Multi-location • Inventory/Vendors • HR/Compliance • Loyalty/CRM • Experiments • Data Pipes • Save/Load
+# v3 additions: Stripe-style payouts • Role Marketplace (hire new AI agents) • Scenario Planner (price/promo/hours)
+# also: small guards, cleaner exports, and table seeds
 
 import streamlit as st
-import random, textwrap, json, uuid, base64, io
+import random, textwrap, json, uuid, base64, io, math
 from datetime import datetime, timedelta, date, time
 import pandas as pd
 import altair as alt
 from PIL import Image, ImageDraw, ImageFont
 from typing import List, Dict, Optional
 
-st.set_page_config(page_title="OperAI — AI Virtual Company", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="OperAI — Your Operational AI Virtual Company!", page_icon="🤖", layout="wide")
 
 # ===========
 # Global CSS
@@ -62,6 +63,7 @@ def ensure_state():
     ss.setdefault("emails", {})                   # {agent_id: email}
     ss.setdefault("alerts", [])                   # [{ts, level, text}]
     ss.setdefault("q",""); ss.setdefault("pick",[]); ss.setdefault("fav_only", False)
+
     # Menu items
     if "menu_items" not in ss:
         ss.menu_items = pd.DataFrame([
@@ -107,6 +109,13 @@ def ensure_state():
         {"id":str(uuid.uuid4()),"name":"Square POS","type":"POS","status":"Connected"},
         {"id":str(uuid.uuid4()),"name":"DoorDash","type":"Delivery","status":"Pending"},
     ]))
+    # Payouts (Stripe-like)
+    ss.setdefault("payouts", pd.DataFrame([
+        {"id":str(uuid.uuid4()),"date":str(date.today()-timedelta(days=7)),"amount":3820.45,"status":"Paid","destination":"•••1234"},
+        {"id":str(uuid.uuid4()),"date":str(date.today()-timedelta(days=3)),"amount":4195.60,"status":"Paid","destination":"•••1234"},
+        {"id":str(uuid.uuid4()),"date":str(date.today()+timedelta(days=1)),"amount":4010.10,"status":"Scheduled","destination":"•••1234"},
+    ]))
+
     # Nav
     ss.setdefault("nav", "1) Founder")
     ss.setdefault("comms_target_agent", None)
@@ -242,7 +251,6 @@ def make_agent(role_key: str) -> Dict:
 # Planner → Workflow (DAG)
 # ==========================
 TEMPLATES: Dict[str, Dict] = {
-    # minimal task templates (ids populated at compile time)
     "wf_reservations_boost": {
         "name": "Reservations Conversion Boost",
         "tasks": [
@@ -312,9 +320,8 @@ def compile_workflow_from_needs(needs_text: str, agents: List[Dict]) -> str:
     for tpl_key in intents:
         tpl = TEMPLATES[tpl_key]
         for item in tpl["tasks"]:
-            # resolve owner agent id by role match; pick first
             owner = next((a["id"] for a in agents if a["role_key"] == item["owner"]), None)
-            if not owner:  # fallback: any agent with same category
+            if not owner:
                 owner = next((a["id"] for a in agents if a["cat"] == ROLE_LIBRARY[item["owner"]]["cat"]), agents[0]["id"])
             tid = f"T{len(st.session_state.execution)+1:04}"
             tasks_map[item["title"]] = tid
@@ -322,7 +329,6 @@ def compile_workflow_from_needs(needs_text: str, agents: List[Dict]) -> str:
                 "id": tid, "title": item["title"], "owner": owner,
                 "status": "Planned", "progress": 0, "depends_on": item["depends_on"][:]
             }
-    # convert depends_on names to ids
     for t in st.session_state.execution.values():
         t["depends_on"] = [tasks_map[name] for name in t["depends_on"] if name in tasks_map]
     st.session_state.workflows[wf_id] = {
@@ -371,17 +377,14 @@ def task_stage(pct: int) -> str:
 def exec_tick(n=1):
     ex = st.session_state.execution
     for _ in range(n):
-        # move Planned → In Progress if deps done
         for t in ex.values():
             if t["status"] == "Planned" and all(ex[d]["status"] == "Done" for d in t["depends_on"]):
                 t["status"] = "In Progress"
-        # progress work
         for t in ex.values():
             if t["status"] == "In Progress":
                 t["progress"] = min(100, t["progress"] + random.randint(8,16))
                 t["status"] = task_stage(t["progress"])
             elif t["status"] == "Review":
-                # auto-approve (demo)
                 t["status"] = "Done"; t["progress"] = 100
 
 def kanban_snapshot():
@@ -395,7 +398,6 @@ def kanban_snapshot():
 # =======================
 def create_alert(level: str, text: str):
     st.session_state.alerts.append({"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "level": level, "text": text})
-    # trim
     if len(st.session_state.alerts) > 200:
         st.session_state.alerts = st.session_state.alerts[-200:]
 
@@ -404,22 +406,49 @@ def create_alert(level: str, text: str):
 # =======================
 def compute_kpis() -> Dict[str,str]:
     ex = st.session_state.execution
-    if not ex: return {"Tasks Completed":"0/0 (0%)","Orders Today":"0","On-Time Delivery":"—","Campaign ROI":"—","Revenue":"$0","LTV":"—","Active Locs":"0"}
+    if not ex: 
+        return {"Tasks Completed":"0/0 (0%)","Orders Today":"0","On-Time Delivery":"—","Campaign ROI":"—","Revenue":"$0","LTV":"—","Active Locs":"0"}
     total = len(ex); done = sum(1 for t in ex.values() if t["status"]=="Done")
-    pct = int(done/total*100)
+    pct = int(done/total*100) if total else 0
     orders = 120 + done*3 + random.randint(-8,12)
     on_time = min(99, 90 + done//3)
     roi = round(2.2 + done*0.02, 2)
     revenue = 3500 + done*75
     ltv = 84 + done*0.8
     active_locs = len(st.session_state.locations)
-    return {"Tasks Completed":f"{done}/{total} ({pct}%)","Orders Today":str(max(0,orders)),
-            "On-Time Delivery":f"{on_time}%","Campaign ROI":f"{roi}x","Revenue":f"${int(revenue):,}","LTV":f"${int(ltv)}","Active Locs":str(active_locs)}
+    return {
+    "Tasks Completed": f"{done}/{total} ({pct}%)",
+    "Orders Today": str(max(0, orders)),
+    "On-Time Delivery": f"{on_time}%",
+    "Campaign ROI": f"{roi}x",
+    "Revenue": f"${int(revenue):,}",
+    "LTV": f"${int(ltv)}",
+    "Active Locs": str(active_locs)
+}
 
 def sparkline(values, title):
     df = pd.DataFrame({"x": list(range(len(values))), "y": values})
     ch = alt.Chart(df).mark_line(point=False).encode(x="x:Q", y="y:Q").properties(height=60)
     st.caption(title); st.altair_chart(ch, use_container_width=True)
+
+# =======================
+# Scenario Planner (price/promo/hours) — simple elasticity demo
+# =======================
+def scenario_sim(price_delta_pct: float, promo_discount_pct: float, hours_extension_min: int) -> Dict[str, float]:
+    """Toy model: demand elasticity to price (−0.8), promo lift (+0.6), hours extension linear access (per hour +2%)."""
+    base_orders = 200.0
+    base_aov = 28.4
+    base_ontime = 0.94
+    price_effect = (1 + (price_delta_pct/100.0)) ** (-0.8)
+    promo_effect = 1 + 0.6*(promo_discount_pct/10.0) if promo_discount_pct>0 else 1.0
+    hours_effect = 1 + 0.02*(hours_extension_min/60.0)
+    demand_mult = price_effect * promo_effect * hours_effect
+    orders = base_orders * demand_mult
+    aov = base_aov * (1 + price_delta_pct/100.0) * (1 - promo_discount_pct/100.0*0.5)
+    revenue = orders * aov
+    ontime = min(0.99, base_ontime - 0.01*(orders/200.0 - 1))  # more load slightly reduces on-time
+    roi = 2.2 + 0.02*(promo_discount_pct>0) + 0.01*(price_delta_pct<0)
+    return {"orders": orders, "aov": aov, "revenue": revenue, "ontime": ontime, "roi": roi}
 
 # =======================
 # Updates / Chat / Meetings
@@ -448,7 +477,7 @@ def build_ics(agent_name: str, title: str, start_dt: datetime, duration_min: int
     return f"BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//OperAI//Calendar 1.0//EN\nBEGIN:VEVENT\nUID:{uid}\nDTSTAMP:{dtstamp}\nDTSTART:{dtstart}\nDTEND:{dtend}\nSUMMARY:{title or ('Meeting with '+agent_name)}\nDESCRIPTION:{description}\nEND:VEVENT\nEND:VCALENDAR\n"
 
 # =======================
-# Helpers: UI + Filters + Assign
+# Helpers: UI + Filters + Assign + Persistence
 # =======================
 def jump_to(page: str):
     st.session_state.nav = page
@@ -457,23 +486,6 @@ def jump_to(page: str):
 def jump_to_comms(agent_id: str, tab: str):
     st.session_state.comms_target_agent = agent_id
     jump_to("6) Comms")
-
-def top_filters():
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns([3,2,2,2,2])
-    st.session_state.q = c1.text_input("Search roles or skills", value=st.session_state.get("q",""))
-    cats = sorted({v["cat"] for v in ROLE_LIBRARY.values()})
-    st.session_state.pick = c2.multiselect("Filter by category", options=cats, default=st.session_state.get("pick",[]))
-    st.session_state.fav_only = c3.checkbox("Favorites only ★", value=st.session_state.get("fav_only", False))
-    if c4.button("⬇️ Download Team JSON"):
-        data = serialize_state()
-        st.download_button("Download", data=json.dumps(data, indent=2), file_name="operai_state.json", mime="application/json")
-    uploaded = c5.file_uploader("Load state (.json)", type=["json"], label_visibility="collapsed")
-    if uploaded:
-        load_state(json.loads(uploaded.read()))
-        st.success("State loaded.")
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
 
 def filtered_agents():
     ags = st.session_state.agents or []
@@ -486,51 +498,11 @@ def filtered_agents():
     return ags
 
 def assign_task(owner_id: str, title: str):
+    if not title.strip(): return
     tid = f"T{len(st.session_state.execution)+1:04}"
     st.session_state.execution[tid] = {"id":tid, "title":title.strip(), "owner":owner_id, "status":"Planned", "progress":0, "depends_on":[]}
     create_alert("info", f"Task created: {title}")
 
-def agent_card(ag: Dict):
-    with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        top = st.columns([1,3,1])
-        with top[0]:
-            st.image(ag["avatar"], caption=ag["name"], use_container_width=True)
-        with top[1]:
-            st.subheader(ag["title"]); st.markdown(f'<span class="badge">{ag["cat"]}</span>', unsafe_allow_html=True)
-            st.write(ag["about"])
-            st.markdown('<div class="chips">', unsafe_allow_html=True)
-            for s in ag["skills"][:5]: st.markdown(f'<span class="chip">{s}</span>', unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-            with st.expander("Responsibilities (Initial Plan)"):
-                for t in ag["tasks"]: st.write(f"• {t}")
-            with st.expander("Quick Actions"):
-                nt = st.text_input(f"Assign a task to {ag['name']}", key=f"nt_{ag['id']}")
-                colqa1, colqa2 = st.columns(2)
-                if colqa1.button("Create Task", key=f"cta_{ag['id']}") and nt.strip():
-                    assign_task(ag["id"], nt); st.success("Task created and scheduled.")
-                play = colqa2.selectbox("Run a playbook", ["—","Reservations Conversion Boost","Ordering Funnel Audit","Weekly P&L Close","Loyalty Winbacks"], key=f"pb_{ag['id']}")
-                if colqa2.button("Run Playbook", key=f"pb_run_{ag['id']}") and play!="—":
-                    st.info(f"Playbook '{play}' queued (demo).")
-        with top[2]:
-            fav = ag["id"] in st.session_state.favorites
-            if st.button(("★ Unpin" if fav else "☆ Pin"), key=f"fav_{ag['id']}"):
-                if fav: st.session_state.favorites.remove(ag["id"])
-                else: st.session_state.favorites.add(ag["id"])
-                st.rerun()
-            st.caption(f"`{ag['email']}`")
-        actions = st.columns(3)
-        if actions[0].button("💬 Chat", key=f"chat_{ag['id']}"): jump_to_comms(ag["id"], "Chat")
-        if actions[1].button("📅 Meeting", key=f"meet_{ag['id']}"): jump_to_comms(ag["id"], "Meetings")
-        if actions[2].button("🔄 Get Update", key=f"upd_{ag['id']}"):
-            record_agent_update(ag["id"]); st.toast(f"Latest update from {ag['name']}")
-        upd = st.session_state.last_updates.get(ag["id"]); 
-        if upd: st.caption(f"**Latest Update:** {upd}")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# =========
-# Persistence (serialize only safe fields)
-# =========
 SERIALIZE_KEYS = ["founder_name","business_name","business_needs","workflows","execution","last_updates"]
 def serialize_state():
     def agent_to_json(a):
@@ -543,14 +515,8 @@ def serialize_state():
     data["emails"] = st.session_state.emails
     data["favorites"] = list(st.session_state.favorites)
     # tables
-    data["menu_items"] = st.session_state.menu_items.to_dict(orient="records")
-    data["inventory"] = st.session_state.inventory.to_dict(orient="records")
-    data["vendors"] = st.session_state.vendors.to_dict(orient="records")
-    data["locations"] = st.session_state.locations.to_dict(orient="records")
-    data["employees"] = st.session_state.employees.to_dict(orient="records")
-    data["crm_customers"] = st.session_state.crm_customers.to_dict(orient="records")
-    data["experiments"] = st.session_state.experiments.to_dict(orient="records")
-    data["connectors"] = st.session_state.connectors.to_dict(orient="records")
+    for name in ["menu_items","inventory","vendors","locations","employees","crm_customers","experiments","connectors","payouts"]:
+        data[name] = getattr(st.session_state, name).to_dict(orient="records")
     data["alerts"] = st.session_state.alerts[-100:]
     return data
 
@@ -572,23 +538,42 @@ def load_state(data: Dict):
     st.session_state.emails = data.get("emails",{})
     st.session_state.favorites = set(data.get("favorites",[]))
     # tables
-    st.session_state.menu_items = pd.DataFrame(data.get("menu_items", []))
-    st.session_state.inventory = pd.DataFrame(data.get("inventory", []))
-    st.session_state.vendors = pd.DataFrame(data.get("vendors", []))
-    st.session_state.locations = pd.DataFrame(data.get("locations", []))
-    st.session_state.employees = pd.DataFrame(data.get("employees", []))
-    st.session_state.crm_customers = pd.DataFrame(data.get("crm_customers", []))
-    st.session_state.experiments = pd.DataFrame(data.get("experiments", []))
-    st.session_state.connectors = pd.DataFrame(data.get("connectors", []))
+    def dfget(key): return pd.DataFrame(data.get(key, []))
+    st.session_state.menu_items = dfget("menu_items")
+    st.session_state.inventory = dfget("inventory")
+    st.session_state.vendors = dfget("vendors")
+    st.session_state.locations = dfget("locations")
+    st.session_state.employees = dfget("employees")
+    st.session_state.crm_customers = dfget("crm_customers")
+    st.session_state.experiments = dfget("experiments")
+    st.session_state.connectors = dfget("connectors")
+    st.session_state.payouts = dfget("payouts")
     st.session_state.alerts = data.get("alerts", [])
+
+def top_filters():
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    c1, c2, c3, c4, c5 = st.columns([3,2,2,2,2])
+    st.session_state.q = c1.text_input("Search roles or skills", value=st.session_state.get("q",""))
+    cats = sorted({v["cat"] for v in ROLE_LIBRARY.values()})
+    st.session_state.pick = c2.multiselect("Filter by category", options=cats, default=st.session_state.get("pick",[]))
+    st.session_state.fav_only = c3.checkbox("Favorites only ★", value=st.session_state.get("fav_only", False))
+    if c4.button("⬇️ Export State (.json)"):
+        data = serialize_state()
+        st.download_button("Download", data=json.dumps(data, indent=2), file_name="operai_state.json", mime="application/json")
+    uploaded = c5.file_uploader("Load state (.json)", type=["json"], label_visibility="collapsed")
+    if uploaded:
+        load_state(json.loads(uploaded.read()))
+        st.success("State loaded.")
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # =========
 # Banner
 # =========
 st.markdown("""
 <div class="operai-banner">
-  <h2 style="margin:0;">🤖 OperAI — The AI Virtual Company</h2>
-  <div class="muted" style="margin-top:6px;">Autonomous agents for reservations, ordering, growth, and operations — coordinated, measurable, and always-on.</div>
+  <h2 style="margin:0;">🤖 OperAI — Your Operational AI Virtual Company!</h2>
+  <div class="muted" style="margin-top:6px;">Operate Smarter, Grow Faster! Operational Virtual AI Company</div>
   <div class="qa">
     <button onclick="window.location.href='#qa-generate'">Generate Team</button>
     <button onclick="window.location.href='#qa-timeline'">Timeline</button>
@@ -604,12 +589,8 @@ st.markdown("""
 # Sidebar
 # =========
 st.sidebar.title("Navigate")
-st.session_state.nav = st.sidebar.radio(
-    "",
-    ["1) Founder","2) Team","3) Timeline","4) Task Execution","5) KPIs","6) Comms","7) Business OS","8) Alerts & Audit"],
-    index=["1) Founder","2) Team","3) Timeline","4) Task Execution","5) KPIs","6) Comms","7) Business OS","8) Alerts & Audit"].index(st.session_state.nav) if st.session_state.get("nav") in ["1) Founder","2) Team","3) Timeline","4) Task Execution","5) KPIs","6) Comms","7) Business OS","8) Alerts & Audit"] else 0,
-    key="nav_radio"
-)
+side_items = ["1) Founder","2) Team","3) Timeline","4) Task Execution","5) KPIs","6) Comms","7) Business OS","8) Alerts & Audit","9) Role Marketplace","10) Scenario Planner"]
+st.session_state.nav = st.sidebar.radio("", side_items, index=side_items.index(st.session_state.get("nav","1) Founder")), key="nav_radio")
 st.sidebar.markdown("---")
 st.sidebar.info("Tip: Pin favorites ★, save/load state, and use per-agent Chat / Meeting / Get Update.")
 
@@ -634,9 +615,7 @@ if st.session_state.nav.startswith("1"):
         st.session_state.business_needs = st.text_area("Business Needs", value=st.session_state.business_needs or placeholder, height=140)
         colg1, colg2, colg3 = st.columns([1,1,1])
         if colg1.button("Generate My AI Team ▶"):
-            # build agents
             st.session_state.agents = [make_agent(k) for k in DEFAULT_ROLE_KEYS]
-            # compile workflow from needs
             wf_id = compile_workflow_from_needs(st.session_state.business_needs, st.session_state.agents)
             build_timeline_from_execution()
             st.success(f"Team ready. Planned workflow: {st.session_state.workflows[wf_id]['name']}")
@@ -663,7 +642,43 @@ elif st.session_state.nav.startswith("2"):
         else:
             cols = st.columns(2)
             for i, ag in enumerate(ags):
-                with cols[i % 2]: agent_card(ag)
+                with cols[i % 2]:
+                    with st.container():
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        top = st.columns([1,3,1])
+                        with top[0]:
+                            st.image(ag["avatar"], caption=ag["name"], use_container_width=True)
+                        with top[1]:
+                            st.subheader(ag["title"]); st.markdown(f'<span class="badge">{ag["cat"]}</span>', unsafe_allow_html=True)
+                            st.write(ag["about"])
+                            st.markdown('<div class="chips">', unsafe_allow_html=True)
+                            for s in ag["skills"][:5]: st.markdown(f'<span class="chip">{s}</span>', unsafe_allow_html=True)
+                            st.markdown('</div>', unsafe_allow_html=True)
+                            with st.expander("Responsibilities (Initial Plan)"):
+                                for t in ag["tasks"]: st.write(f"• {t}")
+                            with st.expander("Quick Actions"):
+                                nt = st.text_input(f"Assign a task to {ag['name']}", key=f"nt_{ag['id']}")
+                                colqa1, colqa2 = st.columns(2)
+                                if colqa1.button("Create Task", key=f"cta_{ag['id']}") and nt.strip():
+                                    assign_task(ag["id"], nt); st.success("Task created and scheduled.")
+                                play = colqa2.selectbox("Run a playbook", ["—","Reservations Conversion Boost","Ordering Funnel Audit","Weekly P&L Close","Loyalty Winbacks"], key=f"pb_{ag['id']}")
+                                if colqa2.button("Run Playbook", key=f"pb_run_{ag['id']}") and play!="—":
+                                    st.info(f"Playbook '{play}' queued (demo).")
+                        with top[2]:
+                            fav = ag["id"] in st.session_state.favorites
+                            if st.button(("★ Unpin" if fav else "☆ Pin"), key=f"fav_{ag['id']}"):
+                                if fav: st.session_state.favorites.remove(ag["id"])
+                                else: st.session_state.favorites.add(ag["id"])
+                                st.rerun()
+                            st.caption(f"`{ag['email']}`")
+                        actions = st.columns(3)
+                        if actions[0].button("💬 Chat", key=f"chat_{ag['id']}"): jump_to_comms(ag["id"], "Chat")
+                        if actions[1].button("📅 Meeting", key=f"meet_{ag['id']}"): jump_to_comms(ag["id"], "Meetings")
+                        if actions[2].button("🔄 Get Update", key=f"upd_{ag['id']}"):
+                            record_agent_update(ag["id"]); st.toast(f"Latest update from {ag['name']}")
+                        upd = st.session_state.last_updates.get(ag["id"]); 
+                        if upd: st.caption(f"**Latest Update:** {upd}")
+                        st.markdown('</div>', unsafe_allow_html=True)
 
 # 3) Timeline
 elif st.session_state.nav.startswith("3"):
@@ -713,7 +728,7 @@ elif st.session_state.nav.startswith("4"):
                     st.success("Execution state reset."); st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
-# 5) KPIs
+# 5) KPIs (also shows quick Scenario snapshot)
 elif st.session_state.nav.startswith("5"):
     st.markdown('<a name="qa-kpi"></a>', unsafe_allow_html=True)
     st.subheader("KPI Dashboard")
@@ -751,7 +766,10 @@ elif st.session_state.nav.startswith("6"):
             ags = filtered_agents()
             cols = st.columns(2)
             for i, ag in enumerate(ags):
-                with cols[i % 2]: agent_card(ag)
+                with cols[i % 2]:
+                    # reuse card from Team page via small inline
+                    st.image(ag["avatar"], caption=f"{ag['name']} — {ag['title']}", use_container_width=True)
+                    if st.button("Chat", key=f"chat2_{ag['id']}"): jump_to_comms(ag["id"], "Chat")
 
         with tabs[1]:
             names = {a["id"]: f"{a['name']} — {a['title']}" for a in st.session_state.agents}
@@ -821,11 +839,14 @@ elif st.session_state.nav.startswith("6"):
                     st.write(f"**{ag['name']} — {ag['title']}**: {upd}")
                 st.markdown('</div>', unsafe_allow_html=True)
 
-# 7) Business OS
+# 7) Business OS (expanded; Finance now includes Payouts)
 elif st.session_state.nav.startswith("7"):
     st.markdown('<a name="qa-bos"></a>', unsafe_allow_html=True)
     st.subheader("Business OS")
-    bos_tab = st.tabs(["Menu Studio","Reservations Ops","Ordering Ops","Delivery Ops","Finance","Marketing","CX","Inventory","Vendors","Locations","HR","Legal & Compliance","CRM & Loyalty","Experiments","Data Pipes","Settings"])
+    bos_tab = st.tabs([
+        "Menu Studio","Reservations Ops","Ordering Ops","Delivery Ops","Finance","Marketing","CX",
+        "Inventory","Vendors","Locations","HR","Legal & Compliance","CRM & Loyalty","Experiments","Data Pipes","Settings"
+    ])
 
     # --- Menu Studio ---
     with bos_tab[0]:
@@ -849,14 +870,10 @@ elif st.session_state.nav.startswith("7"):
                 }
                 st.success("Item added.")
         c1,c2,c3,c4 = st.columns(4)
-        if c1.button("Run Schema Check"):
-            st.info("✓ JSON-LD schema for MenuItem valid (demo).")
-        if c2.button("Sync to POS"):
-            st.success("POS sync queued (demo).")
-        if c3.button("Publish to Channels"):
-            st.success("Publishing to: Website, Google, UberEats, DoorDash (demo).")
-        if c4.button("Price Optimizer (demo)"):
-            st.info("Suggested +$0.50 on top 3 sellers; −$0.25 on low movers.")
+        if c1.button("Run Schema Check"): st.info("✓ JSON-LD schema for MenuItem valid (demo).")
+        if c2.button("Sync to POS"): st.success("POS sync queued (demo).")
+        if c3.button("Publish to Channels"): st.success("Publishing to: Website, Google, UberEats, DoorDash (demo).")
+        if c4.button("Price Optimizer (demo)"): st.info("Suggested +$0.50 on top 3 sellers; −$0.25 on low movers.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # --- Reservations Ops ---
@@ -867,8 +884,7 @@ elif st.session_state.nav.startswith("7"):
         remind = a1.checkbox("SMS reminder 24h before", value=True)
         noshow = a1.checkbox("No-show winback next day", value=True)
         blackout = a2.text_input("Blackout dates (CSV, YYYY-MM-DD)", value="")
-        if st.button("Apply Automations"):
-            st.success("Automations saved (demo). Webhook workers will enforce.")
+        if st.button("Apply Automations"): st.success("Automations saved (demo). Webhook workers will enforce.")
         st.markdown('<hr class="hr-soft"/>', unsafe_allow_html=True)
         st.subheader("Funnel KPIs")
         c1,c2,c3,c4 = st.columns(4)
@@ -886,8 +902,7 @@ elif st.session_state.nav.startswith("7"):
         c1.metric("Checkout Conversion", "42%", "+3%")
         c2.metric("Payment Callback Success", "99.8%", "+0.3%")
         c3.metric("Avg Fulfillment Time", "26m", "-2m")
-        if st.button("Run Synthetic Order"):
-            st.success("E2E order succeeded in 3.2s (demo).")
+        if st.button("Run Synthetic Order"): st.success("E2E order succeeded in 3.2s (demo).")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # --- Delivery Ops ---
@@ -900,22 +915,32 @@ elif st.session_state.nav.startswith("7"):
         c3.metric("Orders Routed", "182", "+12")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- Finance ---
+    # --- Finance (now with payouts) ---
     with bos_tab[4]:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("Finance & P&L (Demo)")
         c1,c2,c3,c4 = st.columns(4)
         c1.metric("Revenue (7d)", "$42,380", "+$2,110")
-        # compute rough gross margin from menu cost
         if not st.session_state.menu_items.empty:
-            rev = st.session_state.menu_items["price"].sum()
-            cogs = st.session_state.menu_items["cost"].sum()
-            gm = (1 - (cogs / rev)) * 100 if rev>0 else 0
+            rev_est = st.session_state.menu_items["price"].sum()
+            cogs_est = st.session_state.menu_items["cost"].sum()
+            gm = (1 - (cogs_est / rev_est)) * 100 if rev_est>0 else 0
         else:
             gm = 68.0
         c2.metric("Gross Margin % (menu est.)", f"{gm:.1f}%")
         c3.metric("AOV", "$28.40", "+$1.10")
         c4.metric("Cash on Hand", "$83,200", "—")
+        st.markdown('<hr class="hr-soft"/>', unsafe_allow_html=True)
+        st.subheader("Payouts (Stripe-style)")
+        st.dataframe(st.session_state.payouts, use_container_width=True)
+        p1,p2,p3 = st.columns(3)
+        next_amt = round(max(3800.0, random.uniform(3600, 4300)), 2)
+        p1.metric("Next Payout (est.)", f"${next_amt:,.2f}")
+        p2.metric("Destination", "•••1234")
+        p3.metric("Schedule", "Every 2 days")
+        if st.button("Simulate Early Payout (demo)"):
+            st.success("Early payout requested (demo).")
+            create_alert("info","Early payout simulated.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # --- Marketing ---
@@ -1034,8 +1059,7 @@ elif st.session_state.nav.startswith("7"):
         st.dataframe(st.session_state.crm_customers, use_container_width=True)
         with st.expander("Create Segment (demo)"):
             seg = st.text_input("Segment Name", "At-risk (no visit 30d)")
-            if st.button("Create Segment"):
-                st.success(f"Segment '{seg}' created (demo).")
+            if st.button("Create Segment"): st.success(f"Segment '{seg}' created (demo).")
         with st.expander("Send Campaign (demo)"):
             subj = st.text_input("Subject", "We miss you — dinner on us?")
             if st.button("Send Preview"):
@@ -1100,5 +1124,44 @@ elif st.session_state.nav.startswith("8"):
         for a in reversed(st.session_state.alerts[-100:]):
             st.write(f"[{a['ts']}] **{a['level'].upper()}** — {a['text']}")
 
+# 9) Role Marketplace — hire new AI agents dynamically
+elif st.session_state.nav.startswith("9"):
+    st.subheader("Role Marketplace — Add AI Employees")
+    cats = sorted({v["cat"] for v in ROLE_LIBRARY.values()})
+    col1,col2 = st.columns([1,3])
+    pick_cat = col1.selectbox("Category", ["All"]+cats)
+    def role_label(k): r=ROLE_LIBRARY[k]; return f"{r['title']}  ·  {r['cat']}"
+    role_keys = list(ROLE_LIBRARY.keys())
+    if pick_cat != "All": role_keys = [k for k in role_keys if ROLE_LIBRARY[k]["cat"]==pick_cat]
+    sel_role = col2.selectbox("Pick a role", role_keys, format_func=lambda k: role_label(k))
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    r = ROLE_LIBRARY[sel_role]
+    st.write(f"**{r['title']}** — _{r['cat']}_")
+    st.write(r["about"])
+    st.write("**Top skills:** " + ", ".join(r["skills"]))
+    if st.button("Hire this AI Agent"):
+        new_ag = make_agent(sel_role)
+        st.session_state.agents.append(new_ag)
+        create_alert("info", f"Hired AI Agent: {new_ag['title']} ({new_ag['name']})")
+        st.success(f"Added {new_ag['title']} — {new_ag['name']}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# 10) Scenario Planner — simulate price/promo/hours and view KPI deltas
+elif st.session_state.nav.startswith("10"):
+    st.subheader("Scenario Planner — Price / Promotion / Hours")
+    c1,c2,c3 = st.columns(3)
+    price_delta = c1.slider("Menu price change (%)", -20, 20, 0, 1)
+    promo_disc = c2.slider("Promo discount (%)", 0, 50, 0, 1)
+    hours_ext  = c3.slider("Extend open hours (minutes)", 0, 240, 0, 15)
+    res = scenario_sim(price_delta, promo_disc, hours_ext)
+    base_rev = 200*28.4
+    delta_rev = res["revenue"] - base_rev
+    d1,d2,d3,d4 = st.columns(4)
+    d1.metric("Projected Orders", f"{int(res['orders']):,}")
+    d2.metric("Projected AOV", f"${res['aov']:.2f}")
+    d3.metric("Projected Revenue", f"${res['revenue']:,.0f}", f"{'+' if delta_rev>=0 else ''}{delta_rev:,.0f}")
+    d4.metric("On-Time % (est.)", f"{res['ontime']*100:.1f}%")
+    st.caption("Toy model only (elasticities baked-in). For demo purposes.")
+
 # Footer
-st.markdown('<div class="muted" style="margin-top:14px;">© OperAI — Premium Streamlit Demo</div>', unsafe_allow_html=True)
+st.markdown('<div class="muted" style="margin-top:14px;">© OperAI s</div>', unsafe_allow_html=True)
