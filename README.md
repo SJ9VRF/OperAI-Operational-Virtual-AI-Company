@@ -2,8 +2,9 @@
 ## Operate Smarter, Grow Faster
 ## Operational Virtual AI Company
 
-Cute, capable autonomous agents that run your business end-to-end — from marketing posts and sales follow-ups to invoices, analytics, and customer support. AIVirtualCompany connects to your live data, learns continuously, and takes safe actions with human-in-the-loop controls.
+<img width="640" height="640" alt="logo_operaai" src="https://github.com/user-attachments/assets/599b6383-57e0-410e-89fe-14ef6f1d168b" />
 
+Cute, capable autonomous agents that run your business end-to-end — from marketing posts and sales follow-ups to invoices, analytics, and customer support. AIVirtualCompany connects to your live data, learns continuously, and takes safe actions with human-in-the-loop controls.
 
 
 ---
